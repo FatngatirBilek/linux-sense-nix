@@ -22,7 +22,6 @@
     };
 
     # ── NixOS module ─────────────────────────────────────────────────────────
-    nixosModules.default = nixosModules.linux-sense;
     nixosModules.linux-sense = { config, pkgs, lib, ... }: {
       imports = [ ./nix/module.nix ];
 
@@ -33,6 +32,7 @@
         })
       ];
     };
+    nixosModules.default = self.nixosModules.linux-sense;
 
     # ── Dev shell ─────────────────────────────────────────────────────────────
     devShells.${system}.default = pkgs.mkShell {
