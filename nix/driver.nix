@@ -17,15 +17,15 @@ stdenv.mkDerivation {
 
   inherit src;
 
-  setSourceRoot = ''
-    export sourceRoot=$(pwd)/driver
+  postUnpack = ''
+    sourceRoot="$sourceRoot/driver"
   '';
 
   nativeBuildInputs = kernel.moduleBuildDependencies ++ [ lld clang ];
 
   makeFlags = [
     "-C" "${kernel.dev}/lib/modules/${kernel.modDirVersion}/build"
-    "M=$(sourceRoot)"
+    "M=$(PWD)"
     "CC=clang"
     "LD=ld.lld"
   ];

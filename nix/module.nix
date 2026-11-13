@@ -28,13 +28,8 @@ in
 
     # ── Kernel driver ────────────────────────────────────────────────────────
     boot.extraModulePackages = [
-      (config.boot.kernelPackages.callPackage ../nix/driver.nix {
-        src = pkgs.fetchFromGitHub {
-          owner = "PoPoGne";
-          repo  = "linux-sense";
-          rev   = "v1.0.1";
-          hash  = "sha256-0pFWZZCMPIVBlBCIvWUtS/HWJpmT8ns51D17KbYzHwY=";
-        };
+      (config.boot.kernelPackages.callPackage ./driver.nix {
+        src = ../.;
       })
     ];
 
