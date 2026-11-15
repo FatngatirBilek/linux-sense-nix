@@ -119,7 +119,9 @@ class IconProvider(QQuickImageProvider):
 # --------------------------------------------------------------------------
 class Telemetry:
     def __init__(self):
+        # CPU temperature: try k10temp (AMD) first, fall back to coretemp (Intel)
         self.k10 = find_hwmon("k10temp")
+        self.coretemp = find_hwmon("coretemp")
         self.acer = find_hwmon("acer")
         self.amdgpu = find_hwmon("amdgpu")
         self.nv_pci = None
@@ -128,9 +130,19 @@ class Telemetry:
                 self.nv_pci = dev
         self.igpu_busy = None
         for card in Path("/sys/class/drm").glob("card[0-9]"):
-            f = card / "device" / "gpu_busy_percent"
-            if f.exists() and "amdgpu" in os.path.realpath(card / "device" / "driver"):
+            dev = card / "device"
+            driver = os.path.realpath(dev / "driver") if (dev / "driver").exists() else ""
+            # AMD iGPU: gpu_busy_percent
+            f = dev / "gpu_busy_percent"
+            if f.exists() and "amdgpu" in driver:
                 self.igpu_busy = f
+                break
+            # Intel iGPU (i915): gt_busy or rc6
+            f_i915 = dev / "drm" / card.name / "gt_act_freq_mhz"
+            if "i915" in driver:
+                # i915 doesn't expose busy% easily; use None (shown as —)
+                self.igpu_busy = None
+                break
         self.bat = next((d for d in Path("/sys/class/power_supply").iterdir()
                          if read(d / "type") == "Battery"), None)
         self._stat = None
@@ -214,7 +226,18 @@ class Telemetry:
         for line in read("/proc/meminfo", "").splitlines():
             k, _, v = line.partition(":")
             mem[k] = int(v.split()[0]) if v.split() else 0
-        cpu_temp = read_int(self.k10 / "temp1_input") / 1000 if self.k10 else None
+        # CPU temp: k10temp (AMD) or coretemp "Package id 0" label (Intel)
+        cpu_temp = None
+        if self.k10:
+            cpu_temp = read_int(self.k10 / "temp1_input") / 1000
+        elif self.coretemp:
+            for lf in sorted(self.coretemp.glob("temp*_label")):
+                if read(lf) == "Package id 0":
+                    inp = Path(str(lf).replace("_label", "_input"))
+                    v = read_int(inp)
+                    if v:
+                        cpu_temp = v / 1000
+                    break
         nv_status = self._nvidia()
         igpu_temp = read_int(self.amdgpu / "temp1_input") / 1000 if self.amdgpu else None
         gpu_temp = self._nv.get("temp")
@@ -249,24 +272,41 @@ def system_info():
             cpu = line.split(":", 1)[1].strip()
             break
     gpus = []
-    if " w/ " in cpu:  # AMD APU: the integrated graphics name is in the CPU model
+    # AMD APU: the integrated graphics name is embedded in the CPU model string
+    if " w/ " in cpu:
         gpus.append("AMD " + cpu.split(" w/ ", 1)[1].replace(" Graphics", ""))
     try:
         out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=3).stdout
         for line in out.splitlines():
-            if ("VGA" in line or "3D controller" in line) and "NVIDIA" in line:
+            if "VGA" not in line and "3D controller" not in line:
+                continue
+            # NVIDIA dGPU
+            if "NVIDIA" in line:
                 name = line.split(": ", 1)[1]
                 if "[" in name and "]" in name:
                     name = name[name.rfind("[", 0, name.rfind("]")) + 1:name.rfind("]")]
                 gpus.append("NVIDIA " + name.replace(" Max-Q / Mobile", " Laptop"))
+            # Intel iGPU (only if AMD APU didn't already add one)
+            elif "Intel" in line and not any("AMD" in g for g in gpus):
+                name = line.split(": ", 1)[1]
+                if "[" in name and "]" in name:
+                    name = name[name.rfind("[", 0, name.rfind("]")) + 1:name.rfind("]")]
+                else:
+                    name = name.split(" (rev")[0].strip()
+                gpus.insert(0, "Intel " + name)
     except OSError:
         pass
     os_name = ""
     for line in read("/etc/os-release", "").splitlines():
         if line.startswith("PRETTY_NAME="):
             os_name = line.split("=", 1)[1].strip('"')
+    # Strip iGPU suffix from CPU model string (AMD "w/ Radeon", Intel "with Iris/UHD")
+    cpu_display = cpu
+    for suffix in (" w/ Radeon", " with Intel", " w/ AMD Radeon"):
+        if suffix in cpu_display:
+            cpu_display = cpu_display[:cpu_display.index(suffix)]
     return {
-        "cpu": cpu.replace(" w/ Radeon 780M Graphics", ""),
+        "cpu": cpu_display.strip(),
         "gpus": gpus,
         "kernel": platform.release(),
         "os": os_name,
