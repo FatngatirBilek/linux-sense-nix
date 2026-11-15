@@ -5,8 +5,17 @@ ScrollPage {
     id: page
     readonly property var st: backend.state
     readonly property var tm: backend.telemetry
+    readonly property var info: backend.info
     readonly property var prof: st.profile || {}
     readonly property var bat: tm.battery || {}
+    // iGPU label: first entry in gpus list that is NOT NVIDIA (Intel or AMD iGPU)
+    readonly property string igpuLabel: {
+        var gs = info ? (info.gpus || []) : []
+        for (var i = 0; i < gs.length; i++) {
+            if (gs[i].indexOf("NVIDIA") === -1) return gs[i]
+        }
+        return "iGPU"
+    }
     signal navigate(int index)
 
     function fmt(v, d) { return v === undefined || v === null ? "—" : Number(v).toFixed(d) }
@@ -96,7 +105,7 @@ ScrollPage {
                     Label { text: "CPU " + page.fmt(page.tm.cpu_temp, 0) + "°"; color: Theme.textDim; font.pixelSize: 12 } }
                 Row { spacing: 6
                     Rectangle { width: 10; height: 3; radius: 2; color: "#c9ced8"; anchors.verticalCenter: parent.verticalCenter }
-                    Label { text: (page.tm.dgpu_active ? "RTX " + page.fmt(page.tm.dgpu_temp, 0) : "Radeon " + page.fmt(page.tm.igpu_temp, 0)) + "°"
+                    Label { text: (page.tm.dgpu_active ? "RTX " + page.fmt(page.tm.dgpu_temp, 0) : page.igpuLabel.split(" ")[0] + " " + page.fmt(page.tm.igpu_temp, 0)) + "°"
                             color: Theme.textDim; font.pixelSize: 12 } }
             }
             Item {
@@ -140,7 +149,7 @@ ScrollPage {
             StatBar { Layout.fillWidth: true; icon: "memory-stick"; label: tr.t("Memory")
                 valueText: page.fmt(page.tm.ram_used, 1) + " / " + page.fmt(page.tm.ram_total, 0) + " GB"
                 fraction: page.tm.ram_total ? page.tm.ram_used / page.tm.ram_total : 0 }
-            StatBar { Layout.fillWidth: true; icon: "monitor-smartphone"; label: tr.t("Radeon 780M integrated graphics")
+            StatBar { Layout.fillWidth: true; icon: "monitor-smartphone"; label: page.igpuLabel
                 valueText: page.fmt(page.tm.igpu_busy, 0) + "%"; fraction: (page.tm.igpu_busy || 0) / 100 }
             StatBar { Layout.fillWidth: true; icon: page.st.ac ? "battery-charging" : "battery"
                 label: page.bat.status === "Charging" ? tr.t("Battery · charging") : (page.st.ac ? tr.t("Battery · adapter connected") : tr.fmt("Battery · draw {power} W", {"power": page.fmt(page.bat.power, 1)}))

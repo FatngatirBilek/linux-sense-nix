@@ -128,7 +128,10 @@ class Telemetry:
         for dev in Path("/sys/bus/pci/devices").iterdir():
             if read(dev / "vendor") == "0x10de" and (read(dev / "class") or "").startswith("0x03"):
                 self.nv_pci = dev
-        self.igpu_busy = None
+        self.igpu_busy = None       # AMD sysfs path
+        self._i915_pdev = None      # Intel i915 pdev string (e.g. "0000:00:02.0")
+        self._i915_prev = None      # (timestamp_ns, {engine: ns}) for fdinfo delta
+        self._igpu_busy_pct = None  # last computed Intel busy %
         for card in Path("/sys/class/drm").glob("card[0-9]"):
             dev = card / "device"
             driver = os.path.realpath(dev / "driver") if (dev / "driver").exists() else ""
@@ -137,11 +140,11 @@ class Telemetry:
             if f.exists() and "amdgpu" in driver:
                 self.igpu_busy = f
                 break
-            # Intel iGPU (i915): gt_busy or rc6
-            f_i915 = dev / "drm" / card.name / "gt_act_freq_mhz"
+            # Intel iGPU (i915): use fdinfo drm-engine-render delta for busy%
             if "i915" in driver:
-                # i915 doesn't expose busy% easily; use None (shown as —)
-                self.igpu_busy = None
+                # pdev is the PCI address, e.g. "0000:00:02.0"
+                self._i915_pdev = read(dev / "uevent", "").split("PCI_SLOT_NAME=")[-1].split()[0] if "PCI_SLOT_NAME=" in read(dev / "uevent", "") else None
+                self.igpu_busy = None   # signals "use fdinfo path"
                 break
         self.bat = next((d for d in Path("/sys/class/power_supply").iterdir()
                          if read(d / "type") == "Battery"), None)
@@ -150,6 +153,40 @@ class Telemetry:
         self._nv = {}
         self.cpu_hist = deque([None] * HISTORY, maxlen=HISTORY)
         self.gpu_hist = deque([None] * HISTORY, maxlen=HISTORY)
+
+    def _i915_busy(self):
+        """Compute Intel i915 GPU render-engine utilization % via /proc/*/fdinfo.
+        Returns 0-100 float or None on first call / no clients."""
+        try:
+            now_ns = time.monotonic_ns()
+            total_ns = 0
+            # Scan all fdinfo files for i915 clients on this pdev
+            for fdinfo in Path("/proc").glob("*/fdinfo/*"):
+                try:
+                    text = fdinfo.read_text()
+                except OSError:
+                    continue
+                if "drm-driver:\ti915" not in text:
+                    continue
+                if self._i915_pdev and self._i915_pdev not in text:
+                    continue
+                for line in text.splitlines():
+                    if line.startswith("drm-engine-"):
+                        val = line.split(":")[1].strip().split()[0]
+                        total_ns += int(val)
+            if self._i915_prev is None:
+                self._i915_prev = (now_ns, total_ns)
+                return None
+            prev_time, prev_total = self._i915_prev
+            self._i915_prev = (now_ns, total_ns)
+            dt = now_ns - prev_time
+            if dt <= 0:
+                return self._igpu_busy_pct
+            busy = min(100.0, (total_ns - prev_total) / dt * 100.0)
+            self._igpu_busy_pct = round(busy, 1)
+            return self._igpu_busy_pct
+        except Exception:
+            return None
 
     def _cpu_usage(self):
         parts = read("/proc/stat", "").splitlines()[0].split()[1:]
@@ -251,7 +288,7 @@ class Telemetry:
             "ram_total": mem.get("MemTotal", 0) / 1048576,
             "ram_used": (mem.get("MemTotal", 0) - mem.get("MemAvailable", 0)) / 1048576,
             "igpu_temp": igpu_temp,
-            "igpu_busy": read_int(self.igpu_busy) if self.igpu_busy else None,
+            "igpu_busy": read_int(self.igpu_busy) if self.igpu_busy else (self._i915_busy() if self._i915_pdev is not None else None),
             "dgpu_status": nv_status or "",
             "dgpu_active": nv_status == "active",
             "dgpu_temp": gpu_temp,
