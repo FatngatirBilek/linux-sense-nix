@@ -156,11 +156,11 @@ class Telemetry:
 
     def _i915_busy(self):
         """Compute Intel i915 GPU render-engine utilization % via /proc/*/fdinfo.
+        Deduplicates by drm-client-id and tracks per-client active time deltas.
         Returns 0-100 float or None on first call / no clients."""
         try:
             now_ns = time.monotonic_ns()
-            total_ns = 0
-            # Scan all fdinfo files for i915 clients on this pdev
+            clients = {}
             for fdinfo in Path("/proc").glob("*/fdinfo/*"):
                 try:
                     text = fdinfo.read_text()
@@ -170,19 +170,35 @@ class Telemetry:
                     continue
                 if self._i915_pdev and self._i915_pdev not in text:
                     continue
+                cid = None
+                engines = 0
                 for line in text.splitlines():
-                    if line.startswith("drm-engine-"):
-                        val = line.split(":")[1].strip().split()[0]
-                        total_ns += int(val)
+                    if line.startswith("drm-client-id:"):
+                        cid = line.split(":", 1)[1].strip()
+                    elif line.startswith("drm-engine-"):
+                        val = line.split(":", 1)[1].strip().split()[0]
+                        engines += int(val)
+                if cid is not None:
+                    clients[cid] = engines
+
             if self._i915_prev is None:
-                self._i915_prev = (now_ns, total_ns)
+                self._i915_prev = (now_ns, clients)
                 return None
-            prev_time, prev_total = self._i915_prev
-            self._i915_prev = (now_ns, total_ns)
+
+            prev_time, prev_clients = self._i915_prev
+            self._i915_prev = (now_ns, clients)
             dt = now_ns - prev_time
             if dt <= 0:
                 return self._igpu_busy_pct
-            busy = min(100.0, (total_ns - prev_total) / dt * 100.0)
+
+            total_active_ns = 0
+            for cid, val in clients.items():
+                if cid in prev_clients:
+                    diff = val - prev_clients[cid]
+                    if diff > 0:
+                        total_active_ns += diff
+
+            busy = min(100.0, (total_active_ns / dt) * 100.0)
             self._igpu_busy_pct = round(busy, 1)
             return self._igpu_busy_pct
         except Exception:
